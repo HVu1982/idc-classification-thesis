@@ -55,7 +55,7 @@ def download_model_from_drive():
         config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
         url = f'https://drive.google.com/uc?id={MODEL_DRIVE_ID}'
         output = str(config.MODEL_PATH)
-        st.toast("⏳ Đang tải Model từ Cloud (Lần đầu)...", icon="cloud")
+        st.toast("⏳ Đang tải Model từ Cloud (Lần đầu)...", icon="☁️")
         try:
             gdown.download(url, output, quiet=False)
             st.success("✅ Tải Model thành công!")
