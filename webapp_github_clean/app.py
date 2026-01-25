@@ -117,7 +117,9 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
     patch_size = config.PATCH_SIZE
     stride = config.STRIDE
     
+    # 1. Tạo mask mô
     tissue_mask = generate_tissue_mask(image_array)
+    
     coords = []
     for y in range(0, h - patch_size + 1, stride):
         for x in range(0, w - patch_size + 1, stride):
@@ -141,7 +143,9 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
     num_workers = 0 if os.name == 'nt' else config.NUM_WORKERS
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     
-    predictions, confidences = [], []
+    predictions = []
+    confidences = []
+    
     with torch.no_grad():
         for i, batch in enumerate(loader):
             batch = batch.to(device)
@@ -152,14 +156,38 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
             if progress_bar:
                 progress_bar.progress((i + 1) / len(loader), text=f"Processing batch {i+1}/{len(loader)}...")
 
+    # --- PHẦN SỬA ĐỔI HIỂN THỊ (QUAN TRỌNG) ---
     heatmap = np.zeros((h, w), dtype=np.float32)
-    overlay = image_array.copy()
+    
+    # Tạo layer màu riêng để blend
+    overlay_layer = image_array.copy()
+    
     cancer_count = 0
+    
+    # Gap: Khoảng hở giữa các ô (pixel)
+    gap = 2 
+    
     for (y, x), pred, conf in zip(coords, predictions, confidences):
-        heatmap[y:y+patch_size, x:x+patch_size] = conf
+        heatmap[y : y + patch_size, x : x + patch_size] = conf
+        
         if pred == 1:
             cancer_count += 1
-            cv2.rectangle(overlay, (x, y), (x+patch_size, y+patch_size), (255, 0, 0), 2)
+            
+            # KỸ THUẬT GRID PADDING:
+            # Vẽ hình chữ nhật nhỏ hơn patch_size một chút để tạo khe hở
+            # Từ (x + gap) đến (x + patch_size - gap)
+            start_pt = (x + gap, y + gap)
+            end_pt = (x + patch_size - gap, y + patch_size - gap)
+            
+            # Vẽ hình chữ nhật ĐẶC (-1) màu đỏ lên lớp overlay
+            cv2.rectangle(overlay_layer, start_pt, end_pt, (255, 0, 0), -1) 
+            
+            # Vẽ thêm viền đậm hơn một chút để rõ nét
+            cv2.rectangle(overlay_layer, start_pt, end_pt, (200, 0, 0), 1)
+
+    # Blend màu đỏ vào ảnh gốc với độ trong suốt 40%
+    # Cách này giúp nhìn xuyên qua được mô bên dưới mà vẫn thấy ô vuông rõ
+    overlay = cv2.addWeighted(image_array, 0.6, overlay_layer, 0.4, 0)
             
     stats = {
         "total_patches": len(coords), "original_patches": total_found,
