@@ -13,7 +13,7 @@ import json
 import pandas as pd
 from pathlib import Path
 import gdown
-from streamlit_image_zoom import image_zoom  # Thư viện kính lúp
+from streamlit_image_zoom import image_zoom
 
 # --- 1. SETUP & IMPORT CONFIG ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +27,7 @@ except ImportError:
 
 sys.path.append(str(config.SRC_DIR))
 
-# --- 2. CẤU HÌNH TRANG ---
+# --- 2. PAGE CONFIG ---
 st.set_page_config(
     page_title=config.APP_TITLE,
     page_icon=config.APP_ICON,
@@ -47,7 +47,6 @@ st.markdown("""
 # ============================================================
 # 📥 TỰ ĐỘNG TẢI MODEL
 # ============================================================
-# ID file .pth (Thay ID của bạn vào đây nếu chưa có)
 MODEL_DRIVE_ID = "1AbC...XYZ_ID_CUA_BAN" 
 
 @st.cache_resource
@@ -117,9 +116,7 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
     patch_size = config.PATCH_SIZE
     stride = config.STRIDE
     
-    # 1. Tạo mask mô
     tissue_mask = generate_tissue_mask(image_array)
-    
     coords = []
     for y in range(0, h - patch_size + 1, stride):
         for x in range(0, w - patch_size + 1, stride):
@@ -143,9 +140,7 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
     num_workers = 0 if os.name == 'nt' else config.NUM_WORKERS
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     
-    predictions = []
-    confidences = []
-    
+    predictions, confidences = [], []
     with torch.no_grad():
         for i, batch in enumerate(loader):
             batch = batch.to(device)
@@ -156,37 +151,23 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
             if progress_bar:
                 progress_bar.progress((i + 1) / len(loader), text=f"Processing batch {i+1}/{len(loader)}...")
 
-    # --- PHẦN SỬA ĐỔI HIỂN THỊ (QUAN TRỌNG) ---
+    # KỸ THUẬT GRID PADDING (VẼ Ô VUÔNG TÁCH RỜI)
     heatmap = np.zeros((h, w), dtype=np.float32)
-    
-    # Tạo layer màu riêng để blend
-    overlay_layer = image_array.copy()
-    
+    overlay_layer = image_array.copy() # Layer riêng để vẽ màu
     cancer_count = 0
-    
-    # Gap: Khoảng hở giữa các ô (pixel)
-    gap = 2 
-    
+    gap = 2 # Khoảng hở giữa các ô (pixel)
+
     for (y, x), pred, conf in zip(coords, predictions, confidences):
-        heatmap[y : y + patch_size, x : x + patch_size] = conf
-        
+        heatmap[y:y+patch_size, x:x+patch_size] = conf
         if pred == 1:
             cancer_count += 1
-            
-            # KỸ THUẬT GRID PADDING:
-            # Vẽ hình chữ nhật nhỏ hơn patch_size một chút để tạo khe hở
-            # Từ (x + gap) đến (x + patch_size - gap)
+            # Vẽ hình chữ nhật nhỏ hơn patch một chút để tạo khe hở
             start_pt = (x + gap, y + gap)
             end_pt = (x + patch_size - gap, y + patch_size - gap)
-            
-            # Vẽ hình chữ nhật ĐẶC (-1) màu đỏ lên lớp overlay
-            cv2.rectangle(overlay_layer, start_pt, end_pt, (255, 0, 0), -1) 
-            
-            # Vẽ thêm viền đậm hơn một chút để rõ nét
-            cv2.rectangle(overlay_layer, start_pt, end_pt, (200, 0, 0), 1)
+            # Vẽ màu đỏ đặc (-1)
+            cv2.rectangle(overlay_layer, start_pt, end_pt, (255, 0, 0), -1)
 
-    # Blend màu đỏ vào ảnh gốc với độ trong suốt 40%
-    # Cách này giúp nhìn xuyên qua được mô bên dưới mà vẫn thấy ô vuông rõ
+    # Blend màu đỏ vào ảnh gốc (Transparency 40%)
     overlay = cv2.addWeighted(image_array, 0.6, overlay_layer, 0.4, 0)
             
     stats = {
@@ -197,12 +178,12 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
     }
     return overlay, heatmap, stats
 
-# --- 4. GIAO DIỆN NGƯỜI DÙNG (MAIN) ---
+# --- 4. MAIN UI ---
 def main():
     if 'analysis_result' not in st.session_state: st.session_state.analysis_result = None
     if 'history' not in st.session_state: st.session_state.history = []
 
-    # === SIDEBAR (ĐẦY ĐỦ TÍNH NĂNG V5.0) ===
+    # === SIDEBAR ===
     with st.sidebar:
         if config.LOGO_PATH and config.LOGO_PATH.exists():
             st.image(str(config.LOGO_PATH), width=120)
@@ -221,16 +202,15 @@ def main():
         default_bs = 3 if config.DEVICE == "cuda" else 1
         ui_batch_size = st.selectbox("Batch Size", [16, 32, 64, 128, 256], index=default_bs)
 
-        # --- LỊCH SỬ PHIÊN (ĐÃ KHÔI PHỤC) ---
         if st.session_state.history:
             st.markdown("---")
             st.subheader("🕒 Lịch sử phiên")
             st.dataframe(pd.DataFrame(st.session_state.history), hide_index=True, height=150)
 
-        # --- CÔNG CỤ BÁO CÁO (ĐÃ KHÔI PHỤC) ---
+        # --- CÔNG CỤ BÁO CÁO (ĐÃ CẬP NHẬT HIỂN THỊ TRỰC TIẾP) ---
         st.markdown("---")
         with st.expander("📊 Công cụ Báo cáo", expanded=False):
-            if st.button("📑 Tổng hợp CSV", use_container_width=True):
+            if st.button("📑 Tổng hợp CSV & Xem", use_container_width=True):
                 results_dir = config.BASE_DIR / "results"
                 csv_files = list(results_dir.glob("stats_*.csv"))
                 if not csv_files:
@@ -242,20 +222,29 @@ def main():
                             combined_df = pd.concat(df_list, ignore_index=True)
                             if 'timestamp' in combined_df.columns:
                                 combined_df = combined_df.sort_values(by='timestamp', ascending=False)
+                            
                             summary_path = results_dir / "summary_report.csv"
                             combined_df.to_csv(summary_path, index=False)
+                            
                             st.success(f"Đã gộp {len(df_list)} file!")
                             
-                            # Hiển thị bảng màu mè
+                            # --- HIỂN THỊ BẢNG NGAY TẠI ĐÂY ---
+                            st.markdown("##### Bảng kết quả tổng hợp:")
                             def highlight_risk(val):
                                 color = '#ffcccc' if isinstance(val, (int, float)) and val >= config.DANGER_THRESHOLD_PERCENT else ''
                                 return f'background-color: {color}'
                             
                             if 'cancer_percentage' in combined_df.columns:
-                                st.dataframe(combined_df.style.map(highlight_risk, subset=['cancer_percentage']), hide_index=True)
+                                st.dataframe(
+                                    combined_df.style.map(highlight_risk, subset=['cancer_percentage'])
+                                               .format({"cancer_percentage": "{:.2f}%", "max_confidence": "{:.4f}"}),
+                                    use_container_width=True, hide_index=True
+                                )
+                            else:
+                                st.dataframe(combined_df, use_container_width=True)
                             
                             with open(summary_path, "rb") as f:
-                                st.download_button("⬇️ Tải Tổng hợp", f, "summary_report.csv", "text/csv")
+                                st.download_button("⬇️ Tải file CSV", f, "summary_report.csv", "text/csv")
                     except Exception as e:
                         st.error(f"Lỗi: {e}")
 
@@ -336,7 +325,7 @@ def main():
             else:
                 st.info(f"📄 Kết quả cho: **{result['filename']}**")
                 
-                # --- PHẦN KÍNH LÚP (ZOOM) MỚI ---
+                # --- PHẦN KÍNH LÚP (ZOOM) ---
                 tab1, tab2 = st.tabs(["🔍 Vùng tổn thương (Zoom)", "🌡️ Bản đồ nhiệt (Zoom)"])
                 
                 # Chuẩn bị ảnh cho zoom
@@ -344,12 +333,10 @@ def main():
                 heatmap_color = cv2.cvtColor(cv2.applyColorMap(heatmap_vis, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
                 blend = cv2.addWeighted(image_array, 0.6, heatmap_color, 0.4, 0)
                 
-                # TAB 1
                 with tab1:
                     st.caption("👉 Di chuột vào ảnh để soi kính lúp:")
                     image_zoom(Image.fromarray(overlay), mode="mousemove", size=700, zoom_factor=3, keep_aspect_ratio=True)
 
-                # TAB 2
                 with tab2:
                     st.caption("👉 Di chuột vào ảnh để soi kính lúp:")
                     image_zoom(Image.fromarray(blend), mode="mousemove", size=700, zoom_factor=3, keep_aspect_ratio=True)
@@ -374,14 +361,17 @@ def main():
                 path_json = results_dir / f"stats_{timestamp}.json"
                 path_csv = results_dir / f"stats_{timestamp}.csv"
 
-                if not path_overlay.exists():
+                if not path_csv.exists():
                      try:
                         results_dir.mkdir(exist_ok=True)
                         cv2.imwrite(str(path_overlay), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-                        # Lưu các file khác...
+                        
                         with open(path_json, "w", encoding="utf-8") as f: json.dump(stats, f, indent=2)
+                        
                         stats_csv = stats.copy()
-                        stats_csv.update({'timestamp': timestamp, 'image_name': current_img_name})
+                        stats_csv.update({'timestamp': timestamp, 'image_name': current_img_name, 
+                                          'device': config.DEVICE, 'threshold': ui_threshold, 
+                                          'batch_size': ui_batch_size, 'max_patches_limit': ui_max_patches})
                         pd.DataFrame([stats_csv]).to_csv(path_csv, index=False)
                      except: pass
                 
