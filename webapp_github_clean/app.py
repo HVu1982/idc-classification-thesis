@@ -12,7 +12,7 @@ import datetime
 import json
 import pandas as pd
 from pathlib import Path
-import shutil # Thư viện để xóa file
+import shutil
 import gdown
 from streamlit_image_zoom import image_zoom
 
@@ -43,8 +43,15 @@ st.markdown("""
         .stApp {background-color: #f8f9fa;}
         div[data-testid="stMetricValue"] {font-size: 1.1rem; font-weight: bold;}
         .block-container {padding-top: 2rem;}
-        /* Nút xóa dữ liệu màu đỏ */
-        div[data-testid="stButton"] button:contains("Xóa toàn bộ") {border-color: #ff4b4b; color: #ff4b4b;}
+        div[data-testid="stDataFrame"] {font-size: 0.85rem;}
+        /* Style cho phần giới thiệu tác giả */
+        .author-box {
+            background-color: #e3f2fd;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            border-left: 3px solid #1976d2;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -52,7 +59,7 @@ st.markdown("""
 # 2. TẢI MODEL & DATASET
 # ============================================================
 # ⚠️ THAY ID CỦA BẠN VÀO DÂY
-MODEL_DRIVE_ID = "1AbC...XYZ_ID_CUA_BAN" 
+MODEL_DRIVE_ID = "1Ruvjg57t-JLoP1QcWK_I8UzcFuUFjCnN" 
 
 @st.cache_resource
 def download_model_from_drive():
@@ -60,7 +67,7 @@ def download_model_from_drive():
         config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
         url = f'https://drive.google.com/uc?id={MODEL_DRIVE_ID}'
         output = str(config.MODEL_PATH)
-        st.toast("⏳ Đang tải Model từ Cloud (Lần đầu chạy)...", icon="☁️")
+        st.toast("⏳ Đang tải Model từ Cloud...", icon="☁️")
         try:
             gdown.download(url, output, quiet=False)
             st.success("✅ Tải Model thành công!")
@@ -163,6 +170,11 @@ def main():
     # === SIDEBAR ===
     with st.sidebar:
         if config.LOGO_PATH.exists(): st.image(str(config.LOGO_PATH), width=120)
+        
+        # --- [CẬP NHẬT] HIỂN THỊ THÔNG TIN TÁC GIẢ TỪ CONFIG ---
+        st.markdown(f'<div class="author-box">{config.APP_DESCRIPTION}</div>', unsafe_allow_html=True)
+        # -------------------------------------------------------
+
         st.header("⚙️ Cấu hình")
         dev_show = "GPU (CUDA)" if torch.cuda.is_available() else "CPU"
         st.info(f"Thiết bị: **{dev_show}**")
@@ -175,21 +187,46 @@ def main():
         ui_threshold = st.slider("Ngưỡng (Threshold)", 0.0, 1.0, config.CONFIDENCE_THRESHOLD, 0.05)
         ui_batch_size = st.selectbox("Batch Size", [16, 32, 64, 128, 256], index=3 if config.DEVICE=="cuda" else 1)
 
-        # --- QUẢN LÝ DỮ LIỆU (TÍNH NĂNG MỚI) ---
+        # LỊCH SỬ
+        if st.session_state.history:
+            st.markdown("---")
+            st.subheader("🕒 Lịch sử phiên")
+            st.dataframe(pd.DataFrame(st.session_state.history), hide_index=True, height=150)
+
+        # CÔNG CỤ BÁO CÁO
         st.markdown("---")
-        with st.expander("🗑️ Quản lý Dữ liệu", expanded=False):
-            st.warning("Xóa tất cả kết quả cũ?")
-            if st.button("Xóa toàn bộ lịch sử", type="primary"):
+        with st.expander("📊 Công cụ Báo cáo", expanded=False):
+            if st.button("📑 Tổng hợp CSV & Xem", use_container_width=True):
+                results_dir = config.BASE_DIR / "results"
+                csv_files = list(results_dir.glob("stats_*.csv")) if results_dir.exists() else []
+                if not csv_files:
+                    st.warning("Chưa có dữ liệu.")
+                else:
+                    try:
+                        df_list = [pd.read_csv(f) for f in csv_files if "summary" not in f.name]
+                        if df_list:
+                            combined_df = pd.concat(df_list, ignore_index=True)
+                            if 'timestamp' in combined_df.columns:
+                                combined_df = combined_df.sort_values(by='timestamp', ascending=False)
+                            
+                            summary_path = results_dir / "summary_report.csv"
+                            combined_df.to_csv(summary_path, index=False)
+                            st.success(f"Đã gộp {len(df_list)} file!")
+                            
+                            def highlight(val): return 'background-color: #ffcccc' if val >= config.DANGER_THRESHOLD_PERCENT else ''
+                            cols = [c for c in ['image_name', 'cancer_percentage', 'max_confidence', 'timestamp'] if c in combined_df.columns]
+                            st.dataframe(combined_df[cols].style.map(highlight, subset=['cancer_percentage'] if 'cancer_percentage' in combined_df else None), hide_index=True)
+                            
+                            with open(summary_path, "rb") as f:
+                                st.download_button("⬇️ Tải file CSV", f, "summary_report.csv", "text/csv")
+                    except Exception as e: st.error(f"Lỗi: {e}")
+
+            if st.button("🗑️ Xóa toàn bộ lịch sử", type="primary"):
                 results_dir = config.BASE_DIR / "results"
                 if results_dir.exists():
-                    shutil.rmtree(results_dir) # Xóa sạch thư mục
-                    results_dir.mkdir()        # Tạo lại thư mục rỗng
-                    st.session_state.history = [] # Reset lịch sử trên RAM
-                    st.session_state.analysis_result = None
-                    st.toast("Đã xóa sạch dữ liệu!", icon="🧹")
+                    shutil.rmtree(results_dir); results_dir.mkdir()
+                    st.session_state.history = []; st.session_state.analysis_result = None
                     st.rerun()
-
-        st.caption("© 2026 Vũ Hữu Hoàng")
 
     # === MAIN CONTENT ===
     st.title(config.APP_TITLE)
@@ -241,8 +278,8 @@ def main():
         if res and res.get('filename') == current_img_name:
             overlay, heatmap, stats, ts = res['overlay'], res['heatmap'], res['stats'], res['timestamp']
             
-            # TABS HIỂN THỊ
-            t1, t2, t3 = st.tabs(["🔍 Soi vùng bệnh", "🌡️ Heatmap", "📊 Báo cáo"])
+            # TABS HIỂN THỊ (CÓ ZOOM)
+            t1, t2 = st.tabs(["🔍 Soi vùng bệnh", "🌡️ Heatmap"])
             
             hm_vis = (np.clip(heatmap, 0, 1) * 255).astype(np.uint8)
             hm_color = cv2.cvtColor(cv2.applyColorMap(hm_vis, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
@@ -255,36 +292,19 @@ def main():
                 st.caption("Di chuột để phóng to:")
                 image_zoom(Image.fromarray(blend), mode="mousemove", size=700, zoom_factor=3)
             
-            # TAB BÁO CÁO (TÍNH NĂNG MỚI: XEM CSV NGAY TẠI ĐÂY)
-            with t3:
-                # Lưu file
-                r_dir = config.BASE_DIR / "results"
-                r_dir.mkdir(exist_ok=True)
-                p_csv = r_dir / f"stats_{ts}.csv"
-                
-                if not p_csv.exists():
-                     try:
+            # Lưu file & Hiển thị Metrics
+            r_dir = config.BASE_DIR / "results"
+            r_dir.mkdir(exist_ok=True)
+            p_csv = r_dir / f"stats_{ts}.csv"
+            
+            if not p_csv.exists():
+                    try:
                         cv2.imwrite(str(r_dir/f"overlay_{ts}.png"), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
                         s_csv = stats.copy()
                         s_csv.update({'timestamp': ts, 'image_name': current_img_name})
                         pd.DataFrame([s_csv]).to_csv(p_csv, index=False)
-                     except: pass
+                    except: pass
 
-                # Gộp file để hiển thị bảng tổng hợp
-                all_csv = list(r_dir.glob("stats_*.csv"))
-                if all_csv:
-                    df_all = pd.concat([pd.read_csv(f) for f in all_csv if "summary" not in f.name], ignore_index=True)
-                    df_all = df_all.sort_values(by='timestamp', ascending=False)
-                    
-                    st.markdown("##### 📋 Lịch sử chẩn đoán:")
-                    def highlight(val): return 'background-color: #ffcccc' if val >= config.DANGER_THRESHOLD_PERCENT else ''
-                    st.dataframe(df_all[['image_name', 'cancer_percentage', 'max_confidence', 'timestamp']]
-                                 .style.map(highlight, subset=['cancer_percentage']), hide_index=True)
-                    
-                    csv_data = df_all.to_csv(index=False).encode('utf-8')
-                    st.download_button("⬇️ Tải file Excel tổng hợp", csv_data, "summary_report.csv", "text/csv")
-
-            # Metrics
             st.divider()
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Tổng Patch", stats['total_patches'])
