@@ -72,7 +72,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 128 if DEVICE == "cuda" else 32
 
 # Số luồng CPU tải dữ liệu
-NUM_WORKERS = 2 if os.name != 'nt' else 0  # Windows set = 0 để tránh lỗi đa luồng
+NUM_WORKERS = 0
 
 # ============================================================
 # 4. CẤU HÌNH GIAO DIỆN (UI SETTINGS)
