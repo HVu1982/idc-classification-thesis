@@ -77,7 +77,7 @@ NUM_WORKERS = 0
 # ============================================================
 # 4. CẤU HÌNH GIAO DIỆN (UI SETTINGS)
 # ============================================================
-APP_TITLE = "Hệ thống hỗ trợ phân loại ung thư vú (IDC)"
+APP_TITLE = "HỆ THỐNG HỖ TRỢ PHÂN LOẠI UNG THƯ VÚ (IDC)"
 APP_ICON = "🧬"
 APP_DESCRIPTION = """ 
 **Mô hình:** Hybrid CNN-DeiT (EMA) 
