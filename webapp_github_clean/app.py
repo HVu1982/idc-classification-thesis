@@ -13,6 +13,7 @@ import json
 import pandas as pd
 from pathlib import Path
 import gdown
+from streamlit_image_zoom import image_zoom
 
 # ============================================================
 # 1. THIẾT LẬP MÔI TRƯỜNG & IMPORT CONFIG
@@ -111,9 +112,11 @@ def generate_tissue_mask(img_rgb):
     tissue_mask = cv2.dilate(tissue_mask, kernel, iterations=1)
     return tissue_mask
 
-def run_inference(model, image_array, device, threshold, batch_size, max_patches, progress_bar):
+def run_inference(model, image_array, device, threshold, batch_size, max_patches, stride, progress_bar):
     h, w = image_array.shape[:2]
-    patch_size = config.PATCH_SIZE; stride = config.STRIDE
+    patch_size = config.PATCH_SIZE
+    # Sử dụng stride được truyền vào hàm thay vì config mặc định
+    
     tissue_mask = generate_tissue_mask(image_array)
     coords = []
     for y in range(0, h - patch_size + 1, stride):
@@ -134,46 +137,73 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
     num_workers = 0 if os.name == 'nt' else config.NUM_WORKERS
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     
-    predictions, confidences = [], []
+    # Ma trận cộng dồn xác suất để làm mịn (Probability Accumulation)
+    prob_map = np.zeros((h, w), dtype=np.float32)
+    count_map = np.zeros((h, w), dtype=np.float32)
+    
+    all_confidences = []
+    
     with torch.no_grad():
+        batch_start_idx = 0
         for i, batch in enumerate(loader):
             batch = batch.to(device)
             outputs = model(batch)
-            probs = torch.softmax(outputs, dim=1)[:, 1]
-            predictions.extend((probs >= threshold).int().cpu().numpy())
-            confidences.extend(probs.cpu().numpy())
+            probs = torch.softmax(outputs, dim=1)[:, 1] # Xác suất lớp ung thư
+            probs_np = probs.cpu().numpy()
+            
+            all_confidences.extend(probs_np)
+            
+            # Map lại vào ảnh gốc (Cộng dồn để xử lý vùng chồng lấn)
+            current_batch_size = len(probs_np)
+            batch_coords = coords[batch_start_idx : batch_start_idx + current_batch_size]
+            
+            for (y, x), p in zip(batch_coords, probs_np):
+                prob_map[y:y+patch_size, x:x+patch_size] += p
+                count_map[y:y+patch_size, x:x+patch_size] += 1
+            
+            batch_start_idx += current_batch_size
+
             if progress_bar: progress_bar.progress((i+1)/len(loader), text=f"Processing batch {i+1}/{len(loader)}...")
 
-    # --- TẠO OVERLAY LIỀN MẠCH & NHẠT HƠN ---
-    heatmap = np.zeros((h, w), dtype=np.float32)
-    overlay_mask = np.zeros((h, w), dtype=np.uint8) # Mask nhị phân
-    cancer_count = 0
-    
-    for (y, x), pred, conf in zip(coords, predictions, confidences):
-        heatmap[y:y+patch_size, x:x+patch_size] = conf
-        if pred == 1:
-            cancer_count += 1
-            # Vẽ ô đặc full size (không trừ hao gap) -> Liền mạch
-            cv2.rectangle(overlay_mask, (x, y), (x+patch_size, y+patch_size), 1, -1)
+    # Tính trung bình Heatmap (Làm mịn các vùng chồng lấn)
+    avg_heatmap = np.divide(prob_map, count_map, out=np.zeros_like(prob_map), where=count_map!=0)
 
-    # Tạo lớp màu đỏ từ mask
-    # Chỉ tô đỏ những chỗ mask=1
-    color_layer = np.zeros_like(image_array)
-    color_layer[overlay_mask == 1] = [255, 0, 0] # Màu đỏ (RGB)
-
-    # Blend: Ảnh gốc 70% + Lớp màu 30% -> Nhạt hơn, dễ nhìn tế bào bên dưới
-    # (Phiên bản trước là 60/40, giờ giảm xuống 30% cho dịu mắt)
+    # --- TẠO OVERLAY MỀM MẠI & LIỀN MẠCH ---
     overlay = image_array.copy()
-    mask_indices = overlay_mask == 1
+    
+    # Tạo mask nhị phân từ heatmap đã làm mịn
+    binary_mask = (avg_heatmap >= threshold).astype(np.uint8)
+    
+    # Dùng thuật toán hình thái học (Morphology) để làm liền mạch các vùng đứt gãy nhỏ
+    kernel_smooth = np.ones((5,5), np.uint8)
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel_smooth)
+    
+    # Tạo lớp màu đỏ
+    red_layer = np.zeros_like(overlay)
+    red_layer[:] = [255, 0, 0] # Đỏ toàn bộ
+    
+    # Chỉ áp dụng ở nơi có mask
+    mask_indices = binary_mask == 1
     if np.any(mask_indices):
-        overlay[mask_indices] = cv2.addWeighted(image_array[mask_indices], 0.7, color_layer[mask_indices], 0.3, 0)
-            
+        # Blend màu đỏ vào ảnh gốc với độ trong suốt 40% (nhạt hơn, dễ nhìn)
+        overlay[mask_indices] = cv2.addWeighted(overlay[mask_indices], 0.6, red_layer[mask_indices], 0.4, 0)
+        
+        # Vẽ viền bao quanh vùng bệnh (Contour) để nổi bật ranh giới
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, contours, -1, (200, 0, 0), 2)
+
+    # Tính thống kê chính xác hơn dựa trên diện tích pixel (do có chồng lấn)
+    total_tissue_pixels = np.count_nonzero(count_map)
+    cancer_pixels = np.count_nonzero(binary_mask)
+    cancer_percentage = round((cancer_pixels / total_tissue_pixels) * 100, 2) if total_tissue_pixels > 0 else 0.0
+
     stats = {
-        "total_patches": len(coords), "original_patches": total_found, "cancer_patches": cancer_count,
-        "cancer_percentage": round((cancer_count/len(coords))*100, 2),
-        "max_confidence": round(float(np.max(confidences)), 4) if confidences else 0
+        "total_patches": len(coords), "original_patches": total_found, 
+        "cancer_patches": int(np.sum(np.array(all_confidences) >= threshold)),
+        "cancer_percentage": cancer_percentage,
+        "max_confidence": round(float(np.max(all_confidences)), 4) if all_confidences else 0
     }
-    return overlay, heatmap, stats
+    return overlay, avg_heatmap, stats
 
 # ============================================================
 # 4. GIAO DIỆN CHÍNH (MAIN)
@@ -193,10 +223,20 @@ def main():
         dev_show = "GPU (CUDA)" if torch.cuda.is_available() else "CPU"
         st.info(f"Thiết bị: **{dev_show}**")
 
-        with st.expander("🛠️ Chi tiết Mô hình", expanded=False):
+        with st.expander("🛠️ Chi tiết & Tối ưu", expanded=False):
             st.markdown(f"**Hybrid CNN-DeiT** (Patches: {config.PATCH_SIZE}px)")
             if config.MODEL_VIZ_PATH.exists(): st.image(str(config.MODEL_VIZ_PATH), caption="Kiến trúc", use_column_width=True)
+            
             ui_max_patches = st.slider("Giới hạn Patch (Demo)", 0, 5000, 0, 100)
+            
+            # --- THANH TRƯỢT ĐỘ MỊN (STRIDE) ---
+            st.markdown("---")
+            ui_stride = st.select_slider(
+                "Độ mịn (Stride)", 
+                options=[10, 25, 50], 
+                value=25,
+                help="10: Rất mịn (Chậm). 25: Mịn vừa (Chuẩn). 50: Nhanh (Thô)."
+            )
 
         ui_threshold = st.slider("Ngưỡng (Threshold)", 0.0, 1.0, config.CONFIDENCE_THRESHOLD, 0.05)
         ui_batch_size = st.selectbox("Batch Size", [16, 32, 64, 128, 256], index=3 if config.DEVICE=="cuda" else 1)
@@ -276,7 +316,11 @@ def main():
                 run_device = "cuda" if torch.cuda.is_available() else "cpu"
                 model = load_model(run_device)
                 if model:
-                    overlay, heatmap, stats = run_inference(model, image_array, run_device, ui_threshold, ui_batch_size, ui_max_patches, progress)
+                    # Truyền thêm tham số ui_stride
+                    overlay, heatmap, stats = run_inference(
+                        model, image_array, run_device, 
+                        ui_threshold, ui_batch_size, ui_max_patches, ui_stride, progress
+                    )
                     progress.empty()
                     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     st.session_state.analysis_result = {'overlay': overlay, 'heatmap': heatmap, 'stats': stats, 'filename': current_img_name, 'timestamp': ts}
@@ -287,21 +331,22 @@ def main():
         if res and res.get('filename') == current_img_name:
             overlay, heatmap, stats, ts = res['overlay'], res['heatmap'], res['stats'], res['timestamp']
             
-            # --- TABS HIỂN THỊ CẢI TIẾN ---
-            t1, t2 = st.tabs(["🔍 Vùng tổn thương", "🌡️ Heatmap"])
+            # --- TABS HIỂN THỊ (CÓ KÍNH LÚP) ---
+            t1, t2 = st.tabs(["🔍 Soi vùng bệnh", "🌡️ Heatmap"])
             
             hm_vis = (np.clip(heatmap, 0, 1) * 255).astype(np.uint8)
             hm_color = cv2.cvtColor(cv2.applyColorMap(hm_vis, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
             blend = cv2.addWeighted(image_array, 0.6, hm_color, 0.4, 0)
 
-            # Tab 1: So sánh Gốc vs Dự đoán (Dùng st.image mặc định để có tính năng phóng to)
+            # Tab 1: So sánh Gốc vs Dự đoán (Dùng image_zoom)
             with t1:
-                st.info("💡 Mẹo: Nhấn vào mũi tên ⤢ ở góc trên bên phải ảnh để xem toàn màn hình và phóng to chi tiết.")
-                st.image(overlay, caption="Phát hiện IDC (Viền đỏ)", use_column_width=True)
+                st.caption("👉 Di chuột để phóng to:")
+                image_zoom(Image.fromarray(overlay), mode="mousemove", size=700, zoom_factor=3, keep_aspect_ratio=True)
 
             # Tab 2: Heatmap
             with t2: 
-                st.image(blend, caption="Bản đồ nhiệt thể hiện độ tin cậy", use_column_width=True)
+                st.caption("👉 Di chuột để phóng to:")
+                image_zoom(Image.fromarray(blend), mode="mousemove", size=700, zoom_factor=3, keep_aspect_ratio=True)
             
             # Lưu file
             r_dir = config.BASE_DIR / "results"
@@ -312,12 +357,11 @@ def main():
                 try:
                     cv2.imwrite(str(r_dir/f"overlay_{ts}.png"), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
                     cv2.imwrite(str(r_dir/f"heatmap_{ts}.png"), cv2.cvtColor(blend, cv2.COLOR_RGB2BGR))
-                    s_csv = stats.copy(); s_csv.update({'timestamp': ts, 'image_name': current_img_name})
+                    s_csv = stats.copy(); s_csv.update({'timestamp': ts, 'image_name': current_img_name, 'stride': ui_stride})
                     pd.DataFrame([s_csv]).to_csv(p_csv, index=False)
                     with open(r_dir/f"stats_{ts}.json", "w") as f: json.dump(stats, f, indent=2)
                 except: pass
 
-            # Metrics
             st.divider()
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Tổng Patch", stats['total_patches'])
@@ -329,7 +373,7 @@ def main():
             if stats['cancer_percentage'] >= config.DANGER_THRESHOLD_PERCENT: st.error(f"🚨 NGUY CƠ CAO ({stats['cancer_percentage']}%)")
             else: st.success("✅ AN TOÀN")
 
-            # --- NÚT TẢI VỀ (ĐÃ KHÔI PHỤC) ---
+            # --- NÚT TẢI VỀ ---
             st.write("---")
             st.markdown("##### 📥 Tải kết quả về máy")
             d1, d2, d3, d4 = st.columns(4)
@@ -347,4 +391,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
