@@ -227,7 +227,8 @@ def main():
             st.markdown(f"**Hybrid CNN-DeiT** (Patches: {config.PATCH_SIZE}px)")
             if config.MODEL_VIZ_PATH.exists(): st.image(str(config.MODEL_VIZ_PATH), caption="Kiến trúc", use_column_width=True)
             
-            ui_max_patches = st.slider("Giới hạn Patch (Demo)", 0, 5000, 0, 100)
+            ui_max_patches = st.slider("Giới hạn Patch (Demo)", 0, 5000, 0, 100,
+                help="0 = Không giới hạn (Chạy hết ảnh). Đặt số thấp (vd: 500) để demo nhanh hơn.")
             
             # --- THANH TRƯỢT ĐỘ MỊN (STRIDE) ---
             st.markdown("---")
@@ -331,7 +332,7 @@ def main():
         if res and res.get('filename') == current_img_name:
             overlay, heatmap, stats, ts = res['overlay'], res['heatmap'], res['stats'], res['timestamp']
             
-            # --- TABS HIỂN THỊ (CÓ KÍNH LÚP) ---
+            # --- TABS HIỂN THỊ ---
             t1, t2 = st.tabs(["🔍 Soi vùng bệnh", "🌡️ Heatmap"])
             
             hm_vis = (np.clip(heatmap, 0, 1) * 255).astype(np.uint8)
@@ -345,8 +346,7 @@ def main():
 
             # Tab 2: Heatmap
             with t2: 
-                st.caption("👉 Di chuột để phóng to:")
-                image_zoom(Image.fromarray(blend), mode="mousemove", size=700, zoom_factor=3, keep_aspect_ratio=True)
+                st.image(blend, caption="Mức độ tin cậy (Heatmap)", use_column_width=True)
             
             # Lưu file
             r_dir = config.BASE_DIR / "results"
@@ -391,3 +391,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
