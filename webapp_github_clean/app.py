@@ -57,7 +57,7 @@ st.markdown("""
 # ============================================================
 # 2. TỰ ĐỘNG TẢI MODEL TỪ GOOGLE DRIVE
 # ============================================================
-MODEL_DRIVE_ID = "1AbC...XYZ_ID_CUA_BAN"  # ⚠️ Thay ID file .pth của bạn vào đây
+MODEL_DRIVE_ID = "1Ruvjg57t-JLoP1QcWK_I8UzcFuUFjCnN"  # ⚠️ Thay ID file .pth của bạn vào đây
 
 @st.cache_resource
 def download_model_from_drive():
@@ -347,3 +347,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
