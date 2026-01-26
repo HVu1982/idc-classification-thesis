@@ -83,11 +83,12 @@ APP_DESCRIPTION = """
 **Mô hình:** Hybrid CNN-DeiT (EMA) 
 **Phiên bản:** v1.0 
 **Tác giả:** Vũ Hữu Hoàng - CH11241003 
-**Đề Thạc sĩ Khoa học Máy tính - K24.1** 
+**Đề án Thạc sĩ Khoa học Máy tính - K24.1** 
 """ 
 CONFIDENCE_THRESHOLD = 0.5 
 RESULTS_DIR = BASE_DIR / "results" 
 RESULTS_DIR.mkdir(exist_ok=True)
 
 # Ngưỡng cảnh báo (Nếu tỷ lệ ung thư vượt quá số này sẽ hiện cảnh báo đỏ)
+
 DANGER_THRESHOLD_PERCENT = 20.0
