@@ -227,7 +227,7 @@ def main():
     with st.sidebar:
         if config.LOGO_PATH.exists(): st.image(str(config.LOGO_PATH), width=120)
         
-        # --- HIỂN THỊ MÔ TẢ (ĐÃ SỬA LỖI XUỐNG DÒNG) ---
+        # --- HIỂN THỊ MÔ TẢ ---
         desc_html = config.APP_DESCRIPTION.strip().replace('\n', '<br>')
         st.markdown(f'<div class="author-box">{desc_html}</div>', unsafe_allow_html=True)
         # -----------------------------------------------
@@ -391,4 +391,5 @@ def main():
                 st.session_state.analysis_result = None; st.rerun()
 
 if __name__ == "__main__":
+
     main()
