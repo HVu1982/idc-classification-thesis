@@ -14,6 +14,7 @@ import pandas as pd
 from pathlib import Path
 import gdown
 from streamlit_image_zoom import image_zoom
+import shutil
 
 # ============================================================
 # 1. THIẾT LẬP MÔI TRƯỜNG & IMPORT CONFIG
@@ -56,23 +57,26 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# 2. TỰ ĐỘNG TẢI MODEL TỪ GOOGLE DRIVE
+# 2. HÀM TẢI MODEL (TÁCH BIỆT UI VÀ LOGIC)
 # ============================================================
-MODEL_DRIVE_ID = "1Ruvjg57t-JLoP1QcWK_I8UzcFuUFjCnN"  # ⚠️ Thay ID file .pth của bạn vào đây
+MODEL_DRIVE_ID = "1Ruvjg57t-JLoP1QcWK_I8UzcFuUFjCnN"  # ID file .pth của bạn
 
-@st.cache_resource
-def download_model_from_drive():
+def check_and_download_model():
+    """
+    Hàm kiểm tra và tải model.
+    Hàm này KHÔNG được cache để đảm bảo logic kiểm tra file luôn chạy.
+    """
     if not config.MODEL_PATH.exists():
         config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
         url = f'https://drive.google.com/uc?id={MODEL_DRIVE_ID}'
         output = str(config.MODEL_PATH)
-        st.toast("⏳ Đang tải Model từ Cloud...", icon="☁️")
         try:
+            # Tải file im lặng, xử lý UI ở bên ngoài
             gdown.download(url, output, quiet=False)
-            st.success("✅ Tải Model thành công!")
-        except Exception as e:
-            st.error(f"❌ Lỗi tải model: {e}")
-            st.stop()
+            return True
+        except Exception:
+            return False
+    return True
 
 # --- 3. CLASS & CORE FUNCTIONS ---
 class WSIPatchDataset(Dataset):
@@ -88,20 +92,28 @@ class WSIPatchDataset(Dataset):
         return patch
 
 @st.cache_resource
-def load_model(device_name):
-    download_model_from_drive()
+def load_model_cached(device_name):
+    """
+    Hàm load model ĐƯỢC CACHE.
+    QUAN TRỌNG: Không được chứa bất kỳ lệnh st. (streamlit UI) nào ở đây.
+    """
     device = torch.device(device_name)
     try:
         from src.model_hybrid1 import CNNDeiTSmall
         model = CNNDeiTSmall(**config.MODEL_PARAMS)
-        if not config.MODEL_PATH.exists(): return None
+        
+        # Kiểm tra file lần nữa cho chắc chắn
+        if not config.MODEL_PATH.exists():
+            return None
+            
         checkpoint = torch.load(config.MODEL_PATH, map_location=device)
         state_dict = checkpoint['model_state'] if 'model_state' in checkpoint else checkpoint
         model.load_state_dict(state_dict, strict=False)
         model.to(device)
         model.eval()
         return model
-    except Exception as e: return None
+    except Exception:
+        return None
 
 def generate_tissue_mask(img_rgb):
     img_hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
@@ -115,7 +127,6 @@ def generate_tissue_mask(img_rgb):
 def run_inference(model, image_array, device, threshold, batch_size, max_patches, stride, progress_bar):
     h, w = image_array.shape[:2]
     patch_size = config.PATCH_SIZE
-    # Sử dụng stride được truyền vào hàm thay vì config mặc định
     
     tissue_mask = generate_tissue_mask(image_array)
     coords = []
@@ -130,14 +141,14 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
     total_found = len(coords)
     if max_patches > 0 and total_found > max_patches:
         coords = coords[:max_patches]
-        st.toast(f"⚡ Demo Mode: {max_patches}/{total_found} patches", icon="🚀")
+        # Bỏ st.toast ở đây để an toàn tuyệt đối cho luồng tính toán
+        # st.toast(f"⚡ Demo Mode: {max_patches}/{total_found} patches", icon="🚀")
 
     transform = T.Compose([T.ToPILImage(), T.Resize(config.MODEL_PARAMS['img_size']), T.ToTensor(), T.Normalize(mean=config.NORMALIZE_MEAN, std=config.NORMALIZE_STD)])
     dataset = WSIPatchDataset(image_array, coords, patch_size, transform)
     num_workers = 0 if os.name == 'nt' else config.NUM_WORKERS
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     
-    # Ma trận cộng dồn xác suất để làm mịn (Probability Accumulation)
     prob_map = np.zeros((h, w), dtype=np.float32)
     count_map = np.zeros((h, w), dtype=np.float32)
     
@@ -148,12 +159,11 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
         for i, batch in enumerate(loader):
             batch = batch.to(device)
             outputs = model(batch)
-            probs = torch.softmax(outputs, dim=1)[:, 1] # Xác suất lớp ung thư
+            probs = torch.softmax(outputs, dim=1)[:, 1] 
             probs_np = probs.cpu().numpy()
             
             all_confidences.extend(probs_np)
             
-            # Map lại vào ảnh gốc (Cộng dồn để xử lý vùng chồng lấn)
             current_batch_size = len(probs_np)
             batch_coords = coords[batch_start_idx : batch_start_idx + current_batch_size]
             
@@ -165,34 +175,23 @@ def run_inference(model, image_array, device, threshold, batch_size, max_patches
 
             if progress_bar: progress_bar.progress((i+1)/len(loader), text=f"Processing batch {i+1}/{len(loader)}...")
 
-    # Tính trung bình Heatmap (Làm mịn các vùng chồng lấn)
     avg_heatmap = np.divide(prob_map, count_map, out=np.zeros_like(prob_map), where=count_map!=0)
 
-    # --- TẠO OVERLAY MỀM MẠI & LIỀN MẠCH ---
+    # --- TẠO OVERLAY ---
     overlay = image_array.copy()
-    
-    # Tạo mask nhị phân từ heatmap đã làm mịn
     binary_mask = (avg_heatmap >= threshold).astype(np.uint8)
-    
-    # Dùng thuật toán hình thái học (Morphology) để làm liền mạch các vùng đứt gãy nhỏ
     kernel_smooth = np.ones((5,5), np.uint8)
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel_smooth)
     
-    # Tạo lớp màu đỏ
     red_layer = np.zeros_like(overlay)
-    red_layer[:] = [255, 0, 0] # Đỏ toàn bộ
+    red_layer[:] = [255, 0, 0]
     
-    # Chỉ áp dụng ở nơi có mask
     mask_indices = binary_mask == 1
     if np.any(mask_indices):
-        # Blend màu đỏ vào ảnh gốc với độ trong suốt 40% (nhạt hơn, dễ nhìn)
         overlay[mask_indices] = cv2.addWeighted(overlay[mask_indices], 0.6, red_layer[mask_indices], 0.4, 0)
-        
-        # Vẽ viền bao quanh vùng bệnh (Contour) để nổi bật ranh giới
         contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(overlay, contours, -1, (200, 0, 0), 2)
 
-    # Tính thống kê chính xác hơn dựa trên diện tích pixel (do có chồng lấn)
     total_tissue_pixels = np.count_nonzero(count_map)
     cancer_pixels = np.count_nonzero(binary_mask)
     cancer_percentage = round((cancer_pixels / total_tissue_pixels) * 100, 2) if total_tissue_pixels > 0 else 0.0
@@ -228,15 +227,14 @@ def main():
             if config.MODEL_VIZ_PATH.exists(): st.image(str(config.MODEL_VIZ_PATH), caption="Kiến trúc", use_column_width=True)
             
             ui_max_patches = st.slider("Giới hạn Patch (Demo)", 0, 5000, 0, 100,
-                help="0 = Không giới hạn (Chạy hết ảnh). Đặt số thấp (vd: 500) để demo nhanh hơn.")
+                help="0 = Không giới hạn. Đặt số thấp (vd: 500) để demo nhanh hơn.")
             
-            # --- THANH TRƯỢT ĐỘ MỊN (STRIDE) ---
             st.markdown("---")
             ui_stride = st.select_slider(
                 "Độ mịn (Stride)", 
                 options=[10, 25, 50], 
                 value=25,
-                help="10: Rất mịn (Chậm). 25: Mịn vừa (Chuẩn). 50: Nhanh (Thô)."
+                help="10: Rất mịn (Chậm). 25: Mịn vừa. 50: Nhanh (Thô)."
             )
 
         ui_threshold = st.slider("Ngưỡng (Threshold)", 0.0, 1.0, config.CONFIDENCE_THRESHOLD, 0.05)
@@ -312,43 +310,64 @@ def main():
     with col2:
         st.subheader("2. Kết quả")
         if analyze and image_pil:
-            progress = st.progress(0, text="Khởi tạo...")
+            # --- BƯỚC 1: KIỂM TRA VÀ TẢI MODEL (NẾU CHƯA CÓ) ---
+            # Bước này thực hiện ở ngoài hàm cache để có thể vẽ UI (spinner/toast)
+            if not config.MODEL_PATH.exists():
+                with st.spinner("⏳ Đang tải Model từ Cloud về máy chủ... (Vui lòng đợi 1-2 phút)"):
+                    success = check_and_download_model()
+                    if success:
+                        st.toast("✅ Đã tải Model thành công!", icon="☁️")
+                    else:
+                        st.error("❌ Không thể tải model. Kiểm tra mạng hoặc link Drive.")
+                        st.stop()
+
+            # --- BƯỚC 2: LOAD MODEL (CACHED) ---
+            # Gọi hàm cache thuần túy (không UI)
+            progress = st.progress(0, text="Khởi tạo Model...")
             try:
                 run_device = "cuda" if torch.cuda.is_available() else "cpu"
-                model = load_model(run_device)
-                if model:
-                    # Truyền thêm tham số ui_stride
+                model = load_model_cached(run_device)
+                
+                if model is None:
+                    st.error("❌ Lỗi: Model file bị hỏng hoặc không tương thích.")
+                else:
+                    # --- BƯỚC 3: CHẠY SUY LUẬN ---
+                    if ui_max_patches > 0:
+                        st.toast(f"⚡ Chế độ Demo: Giới hạn {ui_max_patches} patches", icon="🚀")
+                        
                     overlay, heatmap, stats = run_inference(
                         model, image_array, run_device, 
                         ui_threshold, ui_batch_size, ui_max_patches, ui_stride, progress
                     )
                     progress.empty()
+                    
+                    # Lưu kết quả vào Session
                     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     st.session_state.analysis_result = {'overlay': overlay, 'heatmap': heatmap, 'stats': stats, 'filename': current_img_name, 'timestamp': ts}
                     st.session_state.history.insert(0, {"Time": datetime.datetime.now().strftime("%H:%M"), "File": current_img_name, "Risk": f"{stats['cancer_percentage']}%"})
-            except Exception as e: st.error("Lỗi hệ thống."); st.code(traceback.format_exc())
+            except Exception as e:
+                st.error("Lỗi hệ thống trong quá trình xử lý.")
+                st.code(traceback.format_exc())
 
+        # --- HIỂN THỊ KẾT QUẢ TỪ SESSION ---
         res = st.session_state.analysis_result
         if res and res.get('filename') == current_img_name:
             overlay, heatmap, stats, ts = res['overlay'], res['heatmap'], res['stats'], res['timestamp']
             
-            # --- TABS HIỂN THỊ ---
             t1, t2 = st.tabs(["🔍 Soi vùng bệnh", "🌡️ Heatmap"])
             
             hm_vis = (np.clip(heatmap, 0, 1) * 255).astype(np.uint8)
             hm_color = cv2.cvtColor(cv2.applyColorMap(hm_vis, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
             blend = cv2.addWeighted(image_array, 0.6, hm_color, 0.4, 0)
 
-            # Tab 1: So sánh Gốc vs Dự đoán (Dùng image_zoom)
             with t1:
                 st.caption("👉 Di chuột để phóng to:")
                 image_zoom(Image.fromarray(overlay), mode="mousemove", size=700, zoom_factor=3, keep_aspect_ratio=True)
 
-            # Tab 2: Heatmap
             with t2: 
                 st.image(blend, caption="Mức độ tin cậy (Heatmap)", use_column_width=True)
             
-            # Lưu file
+            # --- LƯU FILE KẾT QUẢ ---
             r_dir = config.BASE_DIR / "results"
             r_dir.mkdir(exist_ok=True)
             p_csv = r_dir / f"stats_{ts}.csv"
@@ -373,7 +392,6 @@ def main():
             if stats['cancer_percentage'] >= config.DANGER_THRESHOLD_PERCENT: st.error(f"🚨 NGUY CƠ CAO ({stats['cancer_percentage']}%)")
             else: st.success("✅ AN TOÀN")
 
-            # --- NÚT TẢI VỀ ---
             st.write("---")
             st.markdown("##### 📥 Tải kết quả về máy")
             d1, d2, d3, d4 = st.columns(4)
@@ -391,5 +409,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
