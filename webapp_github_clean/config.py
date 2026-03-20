@@ -23,9 +23,9 @@ LOGO_PATH = ASSETS_DIR / "logo_DHSG.png" if (ASSETS_DIR / "logo_DHSG.png").exist
 # Đường dẫn ảnh mẫu (Sample Images) để demo nhanh
 SAMPLE_DIR = ASSETS_DIR / "samples"
 SAMPLE_IMAGES = {
-    "Ca Ung thư (IDC)": SAMPLE_DIR / "sample_idc.png",
-    "Ca Lành tính": SAMPLE_DIR / "sample_benign.png",
-    "Ca Nhiễu/Mô đệm": SAMPLE_DIR / "sample_stroma.png"
+    "Ảnh mẫu 1": SAMPLE_DIR / "sample1.png",
+    "Ảnh mẫu 2": SAMPLE_DIR / "sample2.png",
+    "Ảnh mẫu 3": SAMPLE_DIR / "sample3.png"
 }
 
 # Đường dẫn ảnh minh họa kiến trúc (nếu có)
